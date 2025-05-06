@@ -1,0 +1,188 @@
+// old-style plugins that are not registered at plugins.gradle.org:
+buildscript {
+  repositories {
+    mavenCentral()
+    //Needed only for SNAPSHOT versions
+    //maven { url "http://oss.sonatype.org/content/repositories/snapshots/" }
+  }
+}
+
+// new-style plugins that ARE registered at plugins.gradle.org:
+plugins {
+  id 'java-library'
+  id 'signing'
+  id 'com.palantir.git-version' version '0.12.2'
+  id 'io.codearte.nexus-staging' version '0.30.0'
+  id 'maven-publish'
+  id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'com.github.dtreskunov'
+
+def setVersion() {
+  def fromGit = gitVersion() // https://github.com/palantir/gradle-git-version
+  def matcher = (fromGit =~ /^(\d+\.\d+\.\d+)(.*)$/)
+  if (matcher.find()) {
+    def tag = matcher.group(1)
+    def isSnapshot = !matcher.group(2).isEmpty()
+    if (isSnapshot) {
+      version "${tag}-SNAPSHOT"
+    } else {
+      version tag
+    }
+  } else {
+    version fromGit
+  }
+}
+setVersion()
+println "Project version: ${version}"
+
+ext {
+  isSnapshotVersion = version.endsWith('SNAPSHOT')
+  nexusUsername = project.findProperty('nexusUsername') ?: 'secured'
+  nexusPassword = project.findProperty('nexusPassword') ?: 'secured'
+  versions = [
+    opentelemetry: '1.49.0',
+    autoService: '1.1.1',
+    easyssl: '2.4.0'
+  ]
+}
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  api("com.github.dtreskunov:easyssl:${versions.easyssl}")
+  api("io.opentelemetry:opentelemetry-exporter-otlp:${versions.opentelemetry}")
+  api("io.opentelemetry:opentelemetry-sdk-extension-autoconfigure:${versions.opentelemetry}")
+  api("com.google.auto.service:auto-service:${versions.autoService}")
+
+  api('org.springframework.boot:spring-boot:2.7.18')
+  api('org.springframework.boot:spring-boot-autoconfigure:2.7.18')
+  runtimeOnly('org.springframework.boot:spring-boot-starter-validation:2.7.18')
+  api('org.springframework:spring-web:5.3.39')
+  api('org.slf4j:slf4j-api:2.0.17')
+  api('javax.validation:validation-api:2.0.1.Final')
+  api('javax.servlet:javax.servlet-api:4.0.1')
+  
+  api('com.amazonaws:aws-java-sdk-secretsmanager:1.12.783')
+
+  compileOnly('org.projectlombok:lombok:1.18.30')
+  annotationProcessor('org.projectlombok:lombok:1.18.30')
+}
+
+test {
+  useJUnitPlatform()
+  testLogging {
+    showStandardStreams = true
+  }
+}
+
+//disable javadoc doclint for Java8
+if (JavaVersion.current().isJava8Compatible()) {
+  allprojects {
+    tasks.withType(Javadoc) {
+      options.addStringOption('Xdoclint:none', '-quiet')
+    }
+  }
+}
+
+task sourcesJar(type: Jar) {
+  from sourceSets.main.allJava
+  archiveClassifier = 'sources'
+}
+
+task javadocJar(type: Jar) {
+  from javadoc
+  archiveClassifier = 'javadoc'
+}
+
+publishing {
+  publications {
+    mavenJava(MavenPublication) {
+      from components.java
+      artifact sourcesJar
+      artifact javadocJar
+
+      pom {
+        name = 'OpenTelemetry EasySSL extension'
+        description = 'Extension allowing injecting an SSLContext managed by EasySSL into OpenTelemetry'
+        url = 'https://github.com/dtreskunov/opentelemetry-extension-easyssl'
+
+        scm {
+          url = 'scm:git@github.com:dtreskunov/opentelemetry-extension-easyssl.git'
+          connection = 'scm:git@github.com:dtreskunov/opentelemetry-extension-easyssl.git'
+          developerConnection = 'scm:git@github.com:dtreskunov/opentelemetry-extension-easyssl.git'
+        }
+
+        licenses {
+          license {
+            name = 'The Apache Software License, Version 2.0'
+            url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+            distribution = 'repo'
+          }
+        }
+
+        developers {
+          developer {
+            id = 'dtreskunov'
+            name = 'Denis Treskunov'
+          }
+        }
+      }
+    }
+  }
+  repositories {
+    maven {
+      def releasesRepoUrl = "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
+      def snapshotsRepoUrl = "https://oss.sonatype.org/content/repositories/snapshots/"
+      url = isSnapshotVersion ? snapshotsRepoUrl : releasesRepoUrl
+      credentials {
+        username nexusUsername
+        password nexusPassword
+      }
+    }
+  }
+}
+
+signing {
+  if (project.hasProperty('signing.keyId') || !isSnapshotVersion) {
+    sign publishing.publications
+  }
+}
+
+nexusStaging {
+  packageGroup = group
+  numberOfRetries = 20
+  delayBetweenRetriesInMillis = 10000
+  username = nexusUsername
+  password = nexusPassword
+}
+
+task closeAndReleaseRepositoryIfNeeded(dependsOn: closeAndReleaseRepository) {
+  if (isSnapshotVersion) {
+    enabled = false
+    dependsOn = []
+  }
+}
+
+task myPublish {
+  dependsOn publish, closeAndReleaseRepositoryIfNeeded
+  closeAndReleaseRepositoryIfNeeded.mustRunAfter publish
+}
+
+// Configure shadow plugin
+shadowJar {
+  archiveClassifier = 'all'
+  mergeServiceFiles()
+  manifest {
+    attributes 'Main-Class': 'com.github.dtreskunov.opentelemetry.InjectEasySsl'
+  }
+}
+
+// Make sure the shadowJar task is included in the build
+assemble.dependsOn shadowJar
